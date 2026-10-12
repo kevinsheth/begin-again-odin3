@@ -1,0 +1,7 @@
+.DS_Store
+.venv/
+/begin-again
+begin-again.local.json
+dist/
+private/
+.opencode/
