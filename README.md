@@ -15,6 +15,19 @@ and one tool copies it over and sets up everything else.
   SD card or the Odin itself
 - About 75 GB free on the Odin
 
+### Don't have Begin Again built yet?
+
+Build it on any x86 Linux machine or Steam Deck with
+[Jackify](https://github.com/Omni-guides/Jackify), which runs Wabbajack
+modlists on Linux. It can't run on the Odin itself since the Odin is ARM. Do
+the TTW install step from the
+[Begin Again guide](https://www.nexusmods.com/newvegas/mods/79547?tab=description)
+by hand, since Jackify doesn't automate that part for New Vegas lists yet.
+A Windows PC with Wabbajack works too.
+
+When it's done, leave the folders where they are or copy them to your NAS,
+and point setup at them.
+
 ## Set it up
 
 Switch to Desktop Mode, open Konsole and grab the tool:
