@@ -63,17 +63,38 @@ deploys the DLL but leaves the base game alone:
 RootBuilder\exclusions="Saves,Morrowind.ini,Data Files,Data/*.bsa,Data/*.esm,Data/*.nam,Data/*.NAM,Data/*.txt,Data/Music,Data/Shaders,Data/Sound,Data/Video"
 ```
 
-### 5. Add it to Steam
+### 5. Add DSOAL
+
+Don't skip this one. Without it Wine's audio mixer eats almost a whole CPU
+core, so you get crackly audio and frame drops. With it the mixer drops to
+around 5%.
+
+1. Grab [DSOAL r695](https://github.com/kcat/dsoal/releases/download/archive/DSOAL_r695.zip).
+   There's a zip inside the zip
+2. Make a new mod folder called `manager/mods/DSOAL/Root/`
+3. Copy the **Win32** `dsound.dll` and `dsoal-aldrv.dll` into it
+4. Turn on `DSOAL` in Mod Organizer's left pane
+
+Root Builder drops them into the game folder when you launch.
+
+### 6. Add it to Steam
 
 In Desktop Mode, **Add a Non-Steam Game** and pick `manager/ModOrganizer.exe`.
 Then in its properties:
 
 - Name it `Fallout: Begin Again`
 - Start In: your `manager` folder
-- Launch Options: `/usr/libexec/armada/armada-game-launch %command%`
 - Compatibility: **Proton Experimental (ARM64)**
+- Launch Options:
 
-### 6. Pick your settings
+  ```text
+  WINEDLLOVERRIDES="dsound=n,b" DXVK_CONFIG_FILE=/var/home/armada/Games/BeginAgain/game/dxvk.conf /usr/libexec/armada/armada-game-launch %command%
+  ```
+
+The `dsound` bit makes Wine use DSOAL. The `dxvk.conf` bit makes sure Begin
+Again's 60 FPS cap gets picked up.
+
+### 7. Pick your settings
 
 Begin Again's settings are made for a gaming PC, so grab a preset. Open a
 terminal on the Odin (Konsole in Desktop Mode works) and run:
@@ -128,11 +149,6 @@ Each one is a `.fos` and a `.nvse`, so keep the pairs together.
 | Game quits at startup | Apply a preset |
 | Controller stops responding | Apply a preset |
 | Stewie INI warning | Redo step 4 |
+| Crackly audio or big FPS dips | Check DSOAL from step 5 is on and in the launch options |
 
 Expect the odd hitch on loading screens and in big fights.
-
-## Optional: better audio
-
-It works without it, but [DSOAL](https://github.com/kcat/dsoal) adds proper
-3D positional sound. Make a mod called `DSOAL` with `Root/dsound.dll`
-and `Root/dsoal-aldrv.dll` in it and turn it on.
