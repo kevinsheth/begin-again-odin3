@@ -2,12 +2,33 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 // setting is one INI value. Sections and keys match case-insensitively.
 type setting struct {
 	section, key, value string
+}
+
+// parseINI returns every key in text in order. Comments and blank lines are
+// skipped.
+func parseINI(text string) []setting {
+	var settings []setting
+	section := ""
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "", strings.HasPrefix(line, ";"), strings.HasPrefix(line, "#"):
+		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
+			section = strings.TrimSpace(line[1 : len(line)-1])
+		default:
+			if key, value, ok := strings.Cut(line, "="); ok {
+				settings = append(settings, setting{section, strings.TrimSpace(key), strings.TrimSpace(value)})
+			}
+		}
+	}
+	return settings
 }
 
 // applyINI sets each value in place. Every duplicate of a key in its section
@@ -18,7 +39,28 @@ func applyINI(path string, settings []setting) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(editINI(string(data), settings)), 0o644)
+	return writeFile(path, []byte(editINI(string(data), settings)))
+}
+
+// writeFile replaces path atomically so an interrupted run can't leave a
+// half-written file behind.
+func writeFile(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func editINI(text string, settings []setting) string {

@@ -11,7 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -81,8 +82,10 @@ func (s source) list(skip []string) (map[string]int64, error) {
 		if !ok {
 			continue
 		}
-		var n int64
-		fmt.Sscan(size, &n)
+		n, err := strconv.ParseInt(size, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("listing %s: bad size %q", s, size)
+		}
 		if keep(rel) {
 			files[rel] = n
 		}
@@ -110,7 +113,7 @@ func fetch(src source, dest string, skip []string, verify bool) error {
 			total += size
 		}
 	}
-	sort.Strings(need)
+	slices.Sort(need)
 	if len(need) > 0 {
 		fmt.Printf("Copying %d files (%s) from %s\n", len(need), gigabytes(total), src)
 		if err := os.MkdirAll(dest, 0o755); err != nil {
@@ -127,7 +130,7 @@ func fetch(src source, dest string, skip []string, verify bool) error {
 	}
 	for rel, size := range want {
 		if got, ok := have[rel]; !ok || got != size {
-			return fmt.Errorf("%s didn't copy completely. Run setup again to resume", rel)
+			return fmt.Errorf("%s didn't copy completely; run again to resume", rel)
 		}
 	}
 	if verify {
@@ -187,10 +190,10 @@ func copyFiles(src source, dest string, files []string, total int64) error {
 	if err := receive.Run(); err != nil {
 		send.Process.Kill()
 		send.Wait()
-		return fmt.Errorf("copy from %s stopped: %w. Run setup again to resume", src, err)
+		return fmt.Errorf("copying from %s: %w; run again to resume", src, err)
 	}
 	if err := send.Wait(); err != nil {
-		return fmt.Errorf("copy from %s stopped: %w. Run setup again to resume", src, err)
+		return fmt.Errorf("copying from %s: %w; run again to resume", src, err)
 	}
 	return nil
 }
@@ -208,7 +211,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // compareHashes checks every copied file's SHA-256 against the source.
 func compareHashes(src source, dest string, files map[string]int64) error {
-	fmt.Printf("Checking %d files against %s. This takes a while\n", len(files), src)
+	fmt.Printf("Checking %d files against %s\n", len(files), src)
 	want := map[string]string{}
 	if src.host == "" {
 		for rel := range files {
@@ -245,10 +248,10 @@ func compareHashes(src source, dest string, files map[string]int64) error {
 			return err
 		}
 		if got != want[rel] {
-			return fmt.Errorf("%s doesn't match the source. Delete it and run setup again", rel)
+			return fmt.Errorf("%s doesn't match the source; delete it and run again", rel)
 		}
 	}
-	fmt.Println("Every file matches")
+	fmt.Println("All files match")
 	return nil
 }
 
@@ -265,9 +268,9 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// fetchOnce copies src into dest unless an earlier run already finished
-// copying from the same place. Setup edits the copy afterward, so copying
-// again would undo that.
+// fetchOnce copies from into dest unless an earlier run already finished
+// copying from the same place. Later steps edit the copy, and copying again
+// would undo those edits.
 func fetchOnce(from, dest string, skip []string, verify bool) error {
 	if from == "" {
 		return nil
@@ -275,7 +278,6 @@ func fetchOnce(from, dest string, skip []string, verify bool) error {
 	src := parseSource(from)
 	marker := filepath.Join(dest, ".begin-again-odin3-copied")
 	if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == src.String() {
-		fmt.Printf("Already copied %s\n", src)
 		return nil
 	}
 	if err := fetch(src, dest, skip, verify); err != nil {

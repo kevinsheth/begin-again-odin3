@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,28 +11,22 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-const dsoalURL = "https://github.com/kcat/dsoal/releases/download/archive/DSOAL_r695.zip"
+// dsoalURL is a variable so tests can serve their own archive.
+var dsoalURL = "https://github.com/kcat/dsoal/releases/download/archive/DSOAL_r695.zip"
 
-// installDSOAL puts DSOAL's 32-bit DLLs in a Root Builder mod. Wine's own
-// DirectSound mixer uses most of a CPU core on the Odin; DSOAL needs a few
-// percent.
-func (in install) installDSOAL(zipPath string) (bool, error) {
+// installDSOAL puts DSOAL's 32-bit DLLs and licenses in a Root Builder mod.
+// On the Odin, Wine's own DirectSound mixer takes most of a CPU core.
+func (in install) installDSOAL() (bool, error) {
 	root := filepath.Join(in.manager, "mods", dsoalMod, "Root")
 	if _, err := os.Stat(filepath.Join(root, "dsound.dll")); err == nil {
 		return false, nil
 	}
-
-	var data []byte
-	var err error
-	if zipPath != "" {
-		data, err = os.ReadFile(zipPath)
-	} else {
-		data, err = download(dsoalURL)
-	}
+	data, err := download(dsoalURL)
 	if err != nil {
-		return false, fmt.Errorf("getting DSOAL: %w", err)
+		return false, err
 	}
 	files, err := dsoalFiles(data)
 	if err != nil {
@@ -42,7 +37,7 @@ func (in install) installDSOAL(zipPath string) (bool, error) {
 		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
 			return false, err
 		}
-		if err := os.WriteFile(to, contents, 0o644); err != nil {
+		if err := writeFile(to, contents); err != nil {
 			return false, err
 		}
 	}
@@ -50,32 +45,40 @@ func (in install) installDSOAL(zipPath string) (bool, error) {
 }
 
 func download(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	client := http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s returned %s", url, resp.Status)
+		return nil, fmt.Errorf("downloading %s: %s", url, resp.Status)
 	}
 	return io.ReadAll(resp.Body)
 }
 
-// dsoalFiles pulls the Win32 DLLs and license files out of the release, which
-// is a zip inside a zip.
+// dsoalFiles extracts the Win32 DLLs and license files from the release
+// archive, which is a zip inside a zip.
 func dsoalFiles(data []byte) (map[string][]byte, error) {
 	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, fmt.Errorf("DSOAL download isn't a zip: %w", err)
+		return nil, fmt.Errorf("reading DSOAL archive: %w", err)
 	}
 	files := map[string][]byte{}
 	for _, f := range r.File {
+		name := f.Name
+		isZip := strings.HasSuffix(strings.ToLower(name), ".zip")
+		isDLL := name == "DSOAL/Win32/dsound.dll" || name == "DSOAL/Win32/dsoal-aldrv.dll"
+		isLicense := strings.HasPrefix(name, "DSOAL/Documentation/") && strings.Contains(name, "License")
+		if !isZip && !isDLL && !isLicense {
+			continue
+		}
 		contents, err := readZipFile(f)
 		if err != nil {
 			return nil, err
 		}
 		switch {
-		case strings.HasSuffix(strings.ToLower(f.Name), ".zip"):
+		case isZip:
 			inner, err := dsoalFiles(contents)
 			if err != nil {
 				return nil, err
@@ -83,14 +86,14 @@ func dsoalFiles(data []byte) (map[string][]byte, error) {
 			for k, v := range inner {
 				files[k] = v
 			}
-		case f.Name == "DSOAL/Win32/dsound.dll" || f.Name == "DSOAL/Win32/dsoal-aldrv.dll":
-			files[path.Base(f.Name)] = contents
-		case strings.HasPrefix(f.Name, "DSOAL/Documentation/") && strings.Contains(f.Name, "License"):
-			files[path.Join("DSOAL-licenses", path.Base(f.Name))] = contents
+		case isDLL:
+			files[path.Base(name)] = contents
+		case isLicense:
+			files[path.Join("DSOAL-licenses", path.Base(name))] = contents
 		}
 	}
 	if files["dsound.dll"] == nil || files["dsoal-aldrv.dll"] == nil {
-		return nil, fmt.Errorf("DSOAL download is missing its Win32 DLLs")
+		return nil, errors.New("DSOAL archive is missing its Win32 DLLs")
 	}
 	return files, nil
 }

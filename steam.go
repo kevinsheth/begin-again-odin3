@@ -11,11 +11,22 @@ import (
 	"strings"
 )
 
-const compatTool = "proton-experimental-arm64"
+const (
+	compatTool = "proton-experimental-arm64"
 
-var errSteamRunning = errors.New("Steam is running")
+	// steamID64Base converts a 64-bit Steam ID to the account ID used for
+	// userdata folder names.
+	steamID64Base = 76561197960265728
+)
 
-// steamRunning reports whether any Steam client process from root is alive.
+var (
+	errSteamRunning = errors.New("steam is running")
+
+	loginUserPattern  = regexp.MustCompile(`"(\d{17})"\s*\{([^}]*)\}`)
+	mostRecentPattern = regexp.MustCompile(`"MostRecent"\s*"1"`)
+)
+
+// steamRunning reports whether a Steam client process from root is running.
 func steamRunning(root string) bool {
 	procs, _ := filepath.Glob("/proc/[0-9]*/exe")
 	for _, p := range procs {
@@ -24,17 +35,15 @@ func steamRunning(root string) bool {
 			continue
 		}
 		exe = strings.TrimSuffix(exe, " (deleted)")
-		switch filepath.Base(exe) {
-		case "steam", "steamwebhelper":
-			if strings.HasPrefix(exe, root+string(filepath.Separator)) {
-				return true
-			}
+		name := filepath.Base(exe)
+		if (name == "steam" || name == "steamwebhelper") && strings.HasPrefix(exe, root+"/") {
+			return true
 		}
 	}
 	return false
 }
 
-// steamUser finds the account folder under userdata for the most recent login.
+// steamUser returns the userdata folder name of the most recent login.
 func steamUser(root string) (string, error) {
 	dirs, _ := filepath.Glob(filepath.Join(root, "userdata", "[0-9]*"))
 	var users []string
@@ -46,59 +55,56 @@ func steamUser(root string) (string, error) {
 	if len(users) == 1 {
 		return users[0], nil
 	}
-	data, err := os.ReadFile(filepath.Join(root, "config", "loginusers.vdf"))
-	if err == nil {
-		blocks := regexp.MustCompile(`"(\d{17})"\s*\{([^}]*)\}`).FindAllStringSubmatch(string(data), -1)
-		for _, b := range blocks {
-			if regexp.MustCompile(`"MostRecent"\s*"1"`).MatchString(b[2]) {
-				id, _ := strconv.ParseUint(b[1], 10, 64)
-				return strconv.FormatUint(id-76561197960265728, 10), nil
+	if data, err := os.ReadFile(filepath.Join(root, "config", "loginusers.vdf")); err == nil {
+		for _, m := range loginUserPattern.FindAllStringSubmatch(string(data), -1) {
+			if mostRecentPattern.MatchString(m[2]) {
+				id, err := strconv.ParseUint(m[1], 10, 64)
+				if err != nil {
+					return "", err
+				}
+				return strconv.FormatUint(id-steamID64Base, 10), nil
 			}
 		}
 	}
-	return "", fmt.Errorf("found %d Steam accounts and couldn't tell which one is yours", len(users))
+	return "", fmt.Errorf("found %d Steam accounts and none is marked most recent", len(users))
 }
 
 type shortcut struct {
 	name, exe, startDir, options string
 }
 
-// addShortcut creates or updates the non-Steam shortcut for exe and maps it
-// to Armada's ARM64 Proton. Steam must be closed or it overwrites the files.
-func addShortcut(root string, s shortcut) (uint32, error) {
+// addShortcut creates or updates the non-Steam shortcut for s.exe and sets it
+// to use ARM64 Proton. Steam must be closed or it overwrites both files.
+func addShortcut(root string, s shortcut) error {
 	if steamRunning(root) {
-		return 0, errSteamRunning
+		return errSteamRunning
 	}
 	user, err := steamUser(root)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	path := filepath.Join(root, "userdata", user, "config", "shortcuts.vdf")
 	doc := &vdfNode{kind: vdfMap, nodes: []*vdfNode{{kind: vdfMap, key: "shortcuts"}}}
-	if data, err := os.ReadFile(path); err == nil {
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
 		if doc, err = parseVDF(data); err != nil {
-			return 0, fmt.Errorf("reading %s: %w", path, err)
+			return fmt.Errorf("%s: %w", path, err)
 		}
 		if err := backup(path); err != nil {
-			return 0, err
+			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return 0, err
+	case !errors.Is(err, os.ErrNotExist):
+		return err
 	}
 	list := doc.child("shortcuts")
 	if list == nil {
-		return 0, fmt.Errorf("%s has no shortcuts list", path)
+		return fmt.Errorf("%s has no shortcuts list", path)
 	}
 
 	quoted := `"` + s.exe + `"`
-	var entry *vdfNode
-	for _, n := range list.nodes {
-		if exe := n.child("Exe"); exe != nil && (exe.str == quoted || exe.str == s.exe) {
-			entry = n
-			break
-		}
-	}
+	entry := findShortcut(list, s.exe)
 	if entry == nil {
 		entry = &vdfNode{kind: vdfMap, key: strconv.Itoa(len(list.nodes))}
 		entry.setInt("appid", crc32.ChecksumIEEE([]byte(quoted+s.name))|0x80000000)
@@ -109,9 +115,8 @@ func addShortcut(root string, s shortcut) (uint32, error) {
 	entry.setString("StartDir", `"`+s.startDir+`"`)
 	entry.setString("LaunchOptions", s.options)
 	if entry.child("tags") == nil {
-		for _, k := range []string{"icon", "ShortcutPath"} {
-			entry.setString(k, "")
-		}
+		entry.setString("icon", "")
+		entry.setString("ShortcutPath", "")
 		entry.setInt("IsHidden", 0)
 		entry.setInt("AllowDesktopConfig", 1)
 		entry.setInt("AllowOverlay", 1)
@@ -119,33 +124,42 @@ func addShortcut(root string, s shortcut) (uint32, error) {
 		entry.setInt("LastPlayTime", 0)
 		entry.nodes = append(entry.nodes, &vdfNode{kind: vdfMap, key: "tags"})
 	}
-	id := uint32(entry.child("appid").num)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return 0, err
+		return err
 	}
-	if err := os.WriteFile(path, doc.encode(), 0o644); err != nil {
-		return 0, err
+	if err := writeFile(path, doc.encode()); err != nil {
+		return err
 	}
-	return id, setCompatTool(filepath.Join(root, "config", "config.vdf"), id)
+	id := strconv.FormatUint(entry.child("appid").num, 10)
+	return setCompatTool(filepath.Join(root, "config", "config.vdf"), id)
 }
 
-func setCompatTool(path string, id uint32) error {
+func findShortcut(list *vdfNode, exe string) *vdfNode {
+	for _, n := range list.nodes {
+		if e := n.child("Exe"); e != nil && strings.Trim(e.str, `"`) == exe {
+			return n
+		}
+	}
+	return nil
+}
+
+func setCompatTool(path, id string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	text, err := mapCompatTool(string(data), strconv.FormatUint(uint64(id), 10))
+	text, err := mapCompatTool(string(data), id)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	if err := backup(path); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(text), 0o644)
+	return writeFile(path, []byte(text))
 }
 
-// mapCompatTool edits Steam's text config.vdf so the app uses ARM64 Proton.
+// mapCompatTool sets app id to ARM64 Proton in the text of config.vdf.
 func mapCompatTool(text, id string) (string, error) {
 	lines := strings.Split(text, "\n")
 	start := -1
@@ -156,7 +170,7 @@ func mapCompatTool(text, id string) (string, error) {
 		}
 	}
 	if start < 0 || start+1 >= len(lines) || strings.TrimSpace(lines[start+1]) != "{" {
-		return "", errors.New("no CompatToolMapping section; set the compatibility tool in Steam by hand")
+		return "", errors.New("no CompatToolMapping section; set the compatibility tool in Steam instead")
 	}
 	indent := lines[start+1][:strings.Index(lines[start+1], "{")] + "\t"
 
@@ -171,12 +185,13 @@ func mapCompatTool(text, id string) (string, error) {
 		if depth == 0 {
 			break
 		}
-		if depth == 1 && strings.TrimSpace(lines[i]) == `"`+id+`"` {
-			for j := i + 1; j < len(lines) && strings.TrimSpace(lines[j]) != "}"; j++ {
-				if f := strings.Fields(lines[j]); len(f) == 2 && f[0] == `"name"` {
-					lines[j] = strings.Replace(lines[j], f[1], `"`+compatTool+`"`, 1)
-					return strings.Join(lines, "\n"), nil
-				}
+		if depth != 1 || strings.TrimSpace(lines[i]) != `"`+id+`"` {
+			continue
+		}
+		for j := i + 1; j < len(lines) && strings.TrimSpace(lines[j]) != "}"; j++ {
+			if f := strings.Fields(lines[j]); len(f) == 2 && f[0] == `"name"` {
+				lines[j] = strings.Replace(lines[j], f[1], `"`+compatTool+`"`, 1)
+				return strings.Join(lines, "\n"), nil
 			}
 		}
 	}
@@ -193,14 +208,11 @@ func mapCompatTool(text, id string) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
+// backup keeps a copy of path from before the first run.
 func backup(path string) error {
-	saved := path + ".before-begin-again"
+	saved := path + backupSuffix
 	if _, err := os.Stat(saved); err == nil {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(saved, data, 0o644)
+	return copyFile(path, saved)
 }

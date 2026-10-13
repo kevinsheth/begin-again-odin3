@@ -1,16 +1,26 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
+// rootBuilderExclusions lets Root Builder deploy Stewie's DLL from Data while
+// still leaving the base game's data files alone.
 const rootBuilderExclusions = `"Saves,Morrowind.ini,Data Files,Data/*.bsa,Data/*.esm,Data/*.nam,Data/*.NAM,Data/*.txt,Data/Music,Data/Shaders,Data/Sound,Data/Video"`
+
+var (
+	errGameRunning = errors.New("close the game and Mod Organizer first")
+
+	gamePathPattern        = regexp.MustCompile(`(?m)^gamePath=@ByteArray\((.*)\)\r?$`)
+	baseDirPattern         = regexp.MustCompile(`(?m)^base_directory=(.*?)\r?$`)
+	selectedProfilePattern = regexp.MustCompile(`(?m)^selected_profile=@ByteArray\((.*)\)\r?$`)
+)
 
 // install is a Begin Again copy laid out as <dir>/manager and <dir>/game.
 type install struct {
@@ -22,17 +32,14 @@ func (in install) ini() string { return filepath.Join(in.manager, "ModOrganizer.
 func (in install) check() error {
 	for _, f := range []string{in.ini(), filepath.Join(in.game, "FalloutNV.exe")} {
 		if _, err := os.Stat(f); err != nil {
-			return fmt.Errorf("can't find %s. Pass --mo2 and --game so setup can copy Begin Again over", f)
+			return fmt.Errorf("%s not found; set mo2 and game in [source]", f)
 		}
-	}
-	if gameRunning() {
-		return fmt.Errorf("close the game and Mod Organizer first")
 	}
 	return nil
 }
 
 // gameRunning reports whether Mod Organizer or the game is open. Wine puts
-// the Windows path of the program first on its command line.
+// the program's Windows path first on its command line.
 func gameRunning() bool {
 	cmds, _ := filepath.Glob("/proc/[0-9]*/cmdline")
 	for _, c := range cmds {
@@ -48,11 +55,11 @@ func gameRunning() bool {
 	return false
 }
 
-// windowsPath is how Wine sees a Linux path.
+// windowsPath returns the path Wine uses for a Linux path.
 func windowsPath(p string) string { return "Z:" + strings.ReplaceAll(p, "/", `\`) }
 
-// fixPaths swaps the PC's game and Mod Organizer folders in ModOrganizer.ini
-// for the ones on this device.
+// fixPaths replaces the build machine's game and Mod Organizer folders in
+// ModOrganizer.ini with this device's.
 func (in install) fixPaths() (bool, error) {
 	data, err := os.ReadFile(in.ini())
 	if err != nil {
@@ -61,70 +68,61 @@ func (in install) fixPaths() (bool, error) {
 	text := string(data)
 
 	moves := map[string]string{}
-	if m := regexp.MustCompile(`(?m)^gamePath=@ByteArray\((.*)\)\r?$`).FindStringSubmatch(text); m != nil {
+	if m := gamePathPattern.FindStringSubmatch(text); m != nil {
 		moves[strings.ReplaceAll(m[1], `\\`, `\`)] = windowsPath(in.game)
 	}
-	if m := regexp.MustCompile(`(?m)^base_directory=(.*?)\r?$`).FindStringSubmatch(text); m != nil {
+	if m := baseDirPattern.FindStringSubmatch(text); m != nil {
 		moves[strings.ReplaceAll(m[1], "/", `\`)] = windowsPath(in.manager)
 	}
 
+	// Paths appear with escaped backslashes, forward slashes and plain backslashes.
+	forms := []func(string) string{
+		func(s string) string { return strings.ReplaceAll(s, `\`, `\\`) },
+		func(s string) string { return strings.ReplaceAll(s, `\`, "/") },
+		func(s string) string { return s },
+	}
 	changed := text
 	for from, to := range moves {
-		if strings.EqualFold(from, to) || from == "" {
+		if from == "" || strings.EqualFold(from, to) {
 			continue
 		}
-		for _, form := range []func(string) string{
-			func(s string) string { return strings.ReplaceAll(s, `\`, `\\`) },
-			func(s string) string { return strings.ReplaceAll(s, `\`, "/") },
-			func(s string) string { return s },
-		} {
-			changed = regexp.MustCompile(`(?i)`+regexp.QuoteMeta(form(from))).ReplaceAllLiteralString(changed, form(to))
+		for _, form := range forms {
+			re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(form(from)))
+			changed = re.ReplaceAllLiteralString(changed, form(to))
 		}
 	}
 	changed = editINI(changed, []setting{
-		{"General", "gamePath", "@ByteArray(" + strings.ReplaceAll(windowsPath(in.game), `\`, `\\`) + ")"},
-		{"Settings", "base_directory", strings.ReplaceAll(windowsPath(in.manager), `\`, "/")},
-		{"Settings", "download_directory", strings.ReplaceAll(windowsPath(filepath.Join(in.manager, "downloads")), `\`, "/")},
+		{"General", "gamePath", "@ByteArray(" + forms[0](windowsPath(in.game)) + ")"},
+		{"Settings", "base_directory", forms[1](windowsPath(in.manager))},
+		{"Settings", "download_directory", forms[1](windowsPath(filepath.Join(in.manager, "downloads")))},
 		{"Plugins", `RootBuilder\exclusions`, rootBuilderExclusions},
 	})
 	if changed == text {
 		return false, nil
 	}
-	return true, os.WriteFile(in.ini(), []byte(changed), 0o644)
+	return true, writeFile(in.ini(), []byte(changed))
 }
 
-// fixStewie has Root Builder place Stewie's Tweaks' DLL as a real file in the
-// game folder. Under Wine the DLL can't find its INI through Mod Organizer's
-// virtual file system otherwise.
+// fixStewie has Root Builder place Stewie's Tweaks' DLL in the game folder.
+// Under Wine the DLL can't find its INI through Mod Organizer's virtual file
+// system otherwise.
 func (in install) fixStewie() (bool, error) {
-	mods := filepath.Join(in.manager, "mods")
-	var dll string
-	err := filepath.WalkDir(mods, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(mods, path)
-		if d.IsDir() && strings.Count(rel, string(filepath.Separator)) >= 3 {
-			return fs.SkipDir
-		}
-		if strings.EqualFold(d.Name(), "nvse_stewie_tweaks.dll") && strings.EqualFold(filepath.Base(filepath.Dir(path)), "plugins") &&
-			strings.EqualFold(filepath.Base(filepath.Dir(filepath.Dir(path))), "nvse") && strings.Count(rel, string(filepath.Separator)) == 3 {
-			dll = path
-		}
-		return nil
-	})
+	mods, err := os.ReadDir(filepath.Join(in.manager, "mods"))
 	if err != nil {
 		return false, err
 	}
-	if dll == "" {
-		return false, nil
+	for _, mod := range mods {
+		dir := filepath.Join(in.manager, "mods", mod.Name())
+		dll, ok := findFold(dir, "NVSE/Plugins/nvse_stewie_tweaks.dll")
+		if !ok {
+			continue
+		}
+		if err := copyFile(dll, filepath.Join(dir, "Root", "Data", "NVSE", "Plugins", "nvse_stewie_tweaks.dll")); err != nil {
+			return false, err
+		}
+		return true, os.Rename(dll, dll+".mohidden")
 	}
-	mod := filepath.Dir(filepath.Dir(filepath.Dir(dll)))
-	target := filepath.Join(mod, "Root", "Data", "NVSE", "Plugins", "nvse_stewie_tweaks.dll")
-	if err := copyFile(dll, target); err != nil {
-		return false, err
-	}
-	return true, os.Rename(dll, dll+".mohidden")
+	return false, nil
 }
 
 func (in install) selectedProfile() (string, error) {
@@ -132,66 +130,63 @@ func (in install) selectedProfile() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m := regexp.MustCompile(`(?m)^selected_profile=@ByteArray\((.*)\)\r?$`).FindStringSubmatch(string(data))
+	m := selectedProfilePattern.FindSubmatch(data)
 	if m == nil {
 		return "", fmt.Errorf("no profile selected in %s", in.ini())
 	}
-	return m[1], nil
+	return string(m[1]), nil
 }
 
-func (in install) selectProfile(name string) error {
-	return applyINI(in.ini(), []setting{{"General", "selected_profile", "@ByteArray(" + name + ")"}})
-}
-
-// setMod turns a mod on or off in a profile. New entries go to the top of
-// the list, which is the highest priority.
+// setMod turns a mod on or off in a profile's modlist. New entries go to the
+// top, which is the highest priority.
 func setMod(modlist, mod string, on bool) error {
 	data, err := os.ReadFile(modlist)
 	if err != nil {
 		return err
 	}
+	text := string(data)
 	eol := "\n"
-	if strings.Contains(string(data), "\r\n") {
+	if strings.Contains(text, "\r\n") {
 		eol = "\r\n"
 	}
-	lines := strings.Split(strings.TrimRight(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n"), "\n")
-	state := "-"
+	lines := strings.Split(strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n")
+	entry := "-" + mod
 	if on {
-		state = "+"
+		entry = "+" + mod
 	}
+
 	found := false
-	insert := len(lines)
+	top := len(lines)
 	for i, l := range lines {
 		if l == "+"+mod || l == "-"+mod {
-			lines[i], found = state+mod, true
+			lines[i], found = entry, true
 		}
-		if insert == len(lines) && !strings.HasPrefix(l, "#") {
-			insert = i
+		if top == len(lines) && !strings.HasPrefix(l, "#") {
+			top = i
 		}
 	}
 	if !found {
 		if !on {
 			return nil
 		}
-		lines = append(lines[:insert], append([]string{state + mod}, lines[insert:]...)...)
+		lines = append(lines[:top], append([]string{entry}, lines[top:]...)...)
 	}
-	return os.WriteFile(modlist, []byte(strings.Join(lines, eol)+eol), 0o644)
+	return writeFile(modlist, []byte(strings.Join(lines, eol)+eol))
 }
 
 // winningFile returns the highest-priority enabled mod's copy of rel,
-// ignoring the mods this tool writes.
+// ignoring the mod this tool writes.
 func (in install) winningFile(profile, rel string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(in.manager, "profiles", profile, "modlist.txt"))
+	data, err := os.ReadFile(filepath.Join(in.profileDir(profile), "modlist.txt"))
 	if err != nil {
 		return "", err
 	}
 	for _, l := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
 		mod, ok := strings.CutPrefix(l, "+")
-		if !ok || mod == touchFixMod || mod == aoOffMod {
+		if !ok || mod == touchFixMod {
 			continue
 		}
-		path, ok := findFold(filepath.Join(in.manager, "mods", mod), rel)
-		if ok {
+		if path, ok := findFold(filepath.Join(in.manager, "mods", mod), rel); ok {
 			return path, nil
 		}
 	}
@@ -239,17 +234,4 @@ func copyFile(from, to string) error {
 		return err
 	}
 	return dst.Close()
-}
-
-func copyDir(from, to string) error {
-	return filepath.WalkDir(from, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(from, path)
-		if d.IsDir() {
-			return os.MkdirAll(filepath.Join(to, rel), 0o755)
-		}
-		return copyFile(path, filepath.Join(to, rel))
-	})
 }

@@ -1,80 +1,88 @@
 # Begin Again on Odin 3
 
-Play [Begin Again](https://www.nexusmods.com/newvegas/mods/79547) (the Tale of
-Two Wastelands modlist) on an AYN Odin 3 running
-[Armada OS](https://armadaos.dev/). You bring a finished Begin Again install,
-and one tool copies it over and sets up everything else.
+A tool for running [Begin Again](https://www.nexusmods.com/newvegas/mods/79547),
+the Tale of Two Wastelands modlist, on an AYN Odin 3 with
+[Armada OS](https://armadaos.dev/). It copies an existing Begin Again install
+to the Odin and configures it to run under Proton through Begin Again's own
+Mod Organizer.
 
-## What you need
+## Requirements
 
-- An Odin 3 on Armada with Steam signed in
-- A Begin Again install that Wabbajack already built. That's two folders:
-  the Mod Organizer folder (has `ModOrganizer.exe`) and the clean Fallout New
-  Vegas folder it was built against
-- Those folders somewhere the Odin can reach: a NAS over SSH, a USB drive, an
-  SD card or the Odin itself
-- About 75 GB free on the Odin
+- An Odin 3 running Armada, with Steam signed in
+- A Begin Again install built with Wabbajack: the Mod Organizer folder (the
+  one with `ModOrganizer.exe`) and the clean Fallout New Vegas folder it was
+  built against
+- Access to both folders from the Odin, either over SSH or as a local path
+  such as a USB drive
+- About 75 GB of free space on the Odin
 
-### Don't have Begin Again built yet?
-
-Build it on any x86 Linux machine or Steam Deck with
-[Jackify](https://github.com/Omni-guides/Jackify), which runs Wabbajack
-modlists on Linux. It can't run on the Odin itself since the Odin is ARM. Do
-the TTW install step from the
+To build Begin Again on Linux, use
+[Jackify](https://github.com/Omni-guides/Jackify) on an x86 machine or Steam
+Deck. Jackify doesn't automate the TTW install step for New Vegas lists, so
+follow that part of the
 [Begin Again guide](https://www.nexusmods.com/newvegas/mods/79547?tab=description)
-by hand, since Jackify doesn't automate that part for New Vegas lists yet.
-A Windows PC with Wabbajack works too.
+by hand. Wabbajack on Windows also works.
 
-When it's done, leave the folders where they are or copy them to your NAS,
-and point setup at them.
+## Setup
 
-## Set it up
-
-Switch to Desktop Mode, open Konsole and grab the tool:
+In Desktop Mode, open Konsole and download the tool:
 
 ```sh
 curl -Lo ~/begin-again-odin3 https://github.com/kevinsheth/begin-again-odin3/releases/latest/download/begin-again-odin3
 chmod +x ~/begin-again-odin3
+~/begin-again-odin3
 ```
 
-Then point it at your two folders. This one pulls them from a NAS:
+The first run creates `~/begin-again-odin3.ini`. Set `mo2` and `game` under
+`[source]`:
+
+```ini
+[source]
+mo2 = nas:/volume1/Games/BeginAgain
+game = nas:/volume1/Games/Fallout New Vegas
+```
+
+Use a local path for folders on a USB drive or already on the Odin. For SSH,
+`ssh nas` must work without a password prompt.
+
+Exit Steam, then run the tool again:
 
 ```sh
-~/begin-again-odin3 setup --mo2 nas:/volume1/Games/BeginAgain --game "nas:/volume1/Games/Fallout New Vegas"
+~/begin-again-odin3
 ```
 
-Paths on a USB drive or the Odin work too, like
-`--mo2 "/run/media/armada/USB/Begin Again"`. For a NAS, `ssh nas` has to work
-without a password first.
+It does the following:
 
-That's it. Setup will:
+- Copies both folders to `~/Games/BeginAgain`, leaving out Wabbajack's
+  downloads. An interrupted copy resumes on the next run. Set `verify = true`
+  to compare checksums with the source.
+- Updates Mod Organizer's paths for the Odin.
+- Has Root Builder deploy Stewie's Tweaks' DLL, which can't find its INI under
+  Wine otherwise.
+- Installs [DSOAL](https://github.com/kcat/dsoal). Wine's own DirectSound
+  mixer uses most of a CPU core on the Odin, which causes audio crackling and
+  frame drops.
+- Sets the GPU name the game expects on the Odin. With the build machine's
+  GPU name the game exits at startup.
+- Adds a mod that stops touchscreen taps from switching the game out of
+  controller mode.
+- Adds a Steam shortcut, **Fallout: Begin Again**, that uses Proton
+  Experimental (ARM64).
 
-- Copy everything into `~/Games/BeginAgain`, skipping Wabbajack's downloads.
-  If the copy gets cut off just run it again and it picks up where it stopped.
-  Add `--verify` to check every file against the source
-- Point Mod Organizer at the Odin's folders
-- Fix Stewie's Tweaks so it can find its INI under Wine
-- Install [DSOAL](https://github.com/kcat/dsoal). Without it Wine's audio
-  eats almost a whole CPU core and the game stutters
-- Make an `Odin` profile with settings that run well and a fix so touchscreen
-  taps don't break the controller. Your original profile stays as is
-- Add **Fallout: Begin Again** to Steam with ARM64 Proton
+Running the tool again is safe. It skips anything already done.
 
-Steam has to be closed for that last part. If it's open, setup tells you to
-exit Steam and run `~/begin-again-odin3 steam`.
+## Playing
 
-## Play
+In Gaming Mode, launch **Fallout: Begin Again**. When Mod Organizer opens,
+check that **Begin Again** is selected at the top right and press **Run**. The
+first launch takes a few minutes to reach the main menu.
 
-Head back to Gaming Mode and hit **Play** on **Fallout: Begin Again**. When
-Mod Organizer pops up, make sure it says **Begin Again** at the top right and
-hit **Run**. The first launch takes a couple minutes before the menu shows up.
+Quit from the pause menu and let Mod Organizer close before launching anything
+else.
 
-To quit, save and quit from the pause menu and let Mod Organizer close on its
-own.
+Begin Again uses Fallout 4's controller layout:
 
-Begin Again uses Fallout 4 style controls:
-
-| Button | Does |
+| Button | Action |
 | --- | --- |
 | Select | First/third person |
 | L1 | VATS |
@@ -83,60 +91,83 @@ Begin Again uses Fallout 4 style controls:
 | R3 | Sneak or grab |
 | Hold reload | Holster |
 
-Every save is a `.fos` plus a `.nvse`, so keep the pairs together if you move
-them around.
+Saves are pairs of `.fos` and `.nvse` files. Keep each pair together when
+moving saves.
 
 ## Settings
 
-Close the game, then change whatever you want. Anything you leave out stays
-how it was.
+Begin Again's own graphics settings are used by default. To change them, add
+sections to `~/begin-again-odin3.ini` using the game's INI names and run the
+tool again. They're written to `falloutprefs.ini` and `falloutcustom.ini` in
+the selected Mod Organizer profile. Removing a line restores Begin Again's
+value.
 
-```sh
-~/begin-again-odin3 settings --preset performance
-~/begin-again-odin3 settings --anisotropy 8 --resolution 1920x1080
+These are the settings tested on an Odin 3 Pro, which held about 59 FPS at
+900p. Ambient occlusion was also off in that test, which is set in Vanilla Plus
+AO's own INI rather than here.
+
+```ini
+[Display]
+iSize W=1600
+iSize H=900
+iMultiSample=0
+iWaterMultisamples=0
+iMaxAnisotropy=1
+iMaxDecalsPerFrame=2
+iShadowFilter=0
+iShadowMapResolution=256
+fShadowLODStartFade=100
+fSpecularLODStartFade=200
+fLightLODStartFade=200
+fDecalLOD1=500
+fDecalLOD2=1000
+
+[Grass]
+b30GrassVS=0
+bDrawShaderGrass=0
+fGrassStartFadeDistance=0
+
+[Imagespace]
+bDoDepthOfField=0
+iRadialBlurLevel=0
+
+[Water]
+bUseWaterReflections=0
+bUseWaterRefractions=0
+bUseWaterReflectionBlur=0
+bUseWaterDisplacements=0
+bUseWaterDepth=0
+iWaterReflectWidth=256
+iWaterReflectHeight=256
+iWaterBlurAmount=0
+
+[TerrainManager]
+fBlockLoadDistanceLow=25000
+fBlockLoadDistance=125000
+fTreeLoadDistance=0
+fSplitDistanceMult=0.75
+
+[SpeedTree]
+bForceFullLOD=0
+
+[LOD]
+fLODFadeOutMultActors=2.5
+fLODFadeOutMultObjects=2.5
+fLODFadeOutMultItems=3
 ```
 
-| Preset | Resolution | Effects | How it ran on an Odin 3 Pro |
-| --- | --- | --- | --- |
-| `balanced` | 900p | Off | About 59 FPS. The default |
-| `performance` | 720p | Off | Same FPS, a bit softer |
-| `quality` | 1080p | Begin Again's | Hot and loud, FPS not measured |
+Begin Again caps the frame rate at 60 in `dxvk.conf`. In testing, the game's
+main thread was busier than the GPU.
 
-| Flag | Values |
+Avoid the game launcher's Options screen, since it rewrites the INIs.
+
+## Troubleshooting
+
+| Problem | Fix |
 | --- | --- |
-| `--preset` | `balanced`, `performance`, `quality` |
-| `--resolution` | like `1600x900`, or `default` |
-| `--msaa` | `0`, `2`, `4`, `8` or `default` |
-| `--anisotropy` | `1` to `16`, or `default` |
-| `--ao` | ambient occlusion `on` or `off` |
-| `--shadows` | `on` or `off` |
-| `--water` | reflections and effects `on` or `off` |
-| `--grass` | `on` or `off` |
-| `--blur` | depth of field and radial blur `on` or `off` |
-| `--detail` | decals and light fade distance `high` or `low` |
-| `--draw-distance` | `high` or `low` |
-| `--touch-fix` | `on` or `off` |
-
-`default`, `on` and `high` all mean Begin Again's own value. Begin Again
-already caps the game at 60 FPS.
-
-Change one thing at a time and play a bit. Good first upgrades from
-`balanced` are `--anisotropy 8` and then 1080p. Leave draw distance for last
-since the game's main thread was the bottleneck in testing, not the GPU.
-
-Skip the launcher's Options screen. It rewrites the INIs and can undo your
-settings.
-
-## If something's off
-
-| Problem | Try |
-| --- | --- |
-| Stuck on a loading screen | **Stop Game** in Steam and load an earlier save |
-| Stuttering | `settings --preset performance` |
-| Crackly audio | Run `setup` again to make sure DSOAL is in |
-| Game quits at startup or controller stops working | Run `settings` once |
-
-Expect the odd hitch on loading screens and in big fights.
+| The game freezes on a loading screen | Use **Stop Game** in Steam and load an earlier save |
+| Audio crackles or the frame rate drops sharply | Check that the DSOAL mod is enabled in Mod Organizer |
+| The game exits at startup or the controller stops responding | Run the tool again |
 
 ## Building
 
@@ -145,4 +176,4 @@ go test .
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o begin-again-odin3 .
 ```
 
-Pushing a `v*` tag builds a release.
+Pushing a `v*` tag publishes a release.
